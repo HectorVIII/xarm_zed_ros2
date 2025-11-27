@@ -1,9 +1,12 @@
-# arm_handover/handover_node.py
+# xarm_zed_handover/handover_node.py
 
 import time
+import threading
 
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PointStamped
+from std_srvs.srv import Trigger
 from xarm.wrapper import XArmAPI
 
 from .config import (
@@ -12,9 +15,9 @@ from .config import (
     P0, P1,
     APPROACH_Z_UP, SAFE_Z_MAX,
     CLOSE_APPROACH_SPEED, CLOSE_APPROACH_ACC,
+    P2_ORI,
 )
 from .arm_utils import recover, move, gripper_open, gripper_close
-from .zed_left_hand import detect_left_hand_stable_then_map_to_P2
 from .pull_release import detect_pull_then_release
 
 
@@ -22,67 +25,160 @@ class HandoverNode(Node):
     def __init__(self):
         super().__init__('handover_node')
 
-        # ROS2 参数，可以在 launch 里改 robot_ip
+        # ==== 连接机械臂 ====
         self.declare_parameter('robot_ip', ROBOT_IP)
         robot_ip = self.get_parameter('robot_ip').get_parameter_value().string_value
 
         self.get_logger().info(f'Connecting to xArm at {robot_ip} ...')
         self.arm = XArmAPI(robot_ip, is_radian=False)
         self.arm.connect()
-
-        # 初始化机械臂、夹爪
         recover(self.arm)
+
         self.arm.set_gripper_enable(True)
         self.arm.set_gripper_mode(0)
         self.arm.set_gripper_speed(GRIPPER_SPEED)
 
-        # 这里没有用 timer，而是直接顺序执行一遍 handover
-        self.run_handover()
+        # ==== 状态机相关 ====
+        self.state = "IDLE"   # IDLE / PREPARE / WAIT_HAND / EXECUTING / DONE
+        self.busy = False
+        self.P2 = None
+        self.P2_UP = None
 
-        # 完成后断开连接（如果你想循环执行，可以改成 while + 状态机）
-        self.arm.disconnect()
-        self.get_logger().info('Handover finished, node will exit.')
+        # ==== 订阅左手点 ====
+        self.declare_parameter('left_hand_topic', '/left_hand/point')
+        topic = self.get_parameter('left_hand_topic').get_parameter_value().string_value
 
-    # 把你原来 main() 里的流程搬到这里
-    def run_handover(self):
+        self.left_hand_sub = self.create_subscription(
+            PointStamped,
+            topic,
+            self.left_hand_callback,
+            10
+        )
+        self.get_logger().info(f'Subscribing left hand from topic: {topic}')
+
+        # ==== 创建 /start_handover Service ====
+        self.srv = self.create_service(Trigger, 'start_handover', self.start_handover_cb)
+        self.get_logger().info('Service /start_handover ready. State = IDLE.')
+
+    # --------- Service 回调：触发一轮 handover ---------
+    def start_handover_cb(self, request, response):
+        if self.busy:
+            response.success = False
+            response.message = 'Handover already running.'
+            self.get_logger().warn('Received /start_handover but already running.')
+            return response
+
+        self.get_logger().info('Received /start_handover request, starting handover thread...')
+        self.busy = True
+        self.P2 = None
+        self.P2_UP = None
+
+        # 新开线程跑完整流程，避免阻塞 ROS 回调线程
+        t = threading.Thread(target=self.run_handover_fsm, daemon=True)
+        t.start()
+
+        response.success = True
+        response.message = 'Handover started.'
+        return response
+
+    # --------- 主流程状态机：一轮 handover ---------
+    def run_handover_fsm(self):
+        try:
+            # 1) 准备工具
+            self.state = 'PREPARE'
+            self.prepare_tool()
+
+            # 2) 等待稳定左手点
+            self.state = 'WAIT_HAND'
+            self.get_logger().info('Waiting for stable left hand point...')
+
+            wait_start = time.time()
+            while rclpy.ok() and self.P2 is None:
+                time.sleep(0.05)
+                # 可选：超时保护
+                if time.time() - wait_start > 60.0:  # 超过 60s 还没等到就退出
+                    self.get_logger().warn('Timeout waiting for left hand point, aborting handover.')
+                    return
+
+            if self.P2 is None:
+                self.get_logger().warn('Handover aborted: P2 is None.')
+                return
+
+            # 3) 执行 handover 运动 + FT 检测
+            self.state = 'EXECUTING'
+            self.execute_handover()
+
+            self.state = 'DONE'
+            self.get_logger().info('Handover finished. State = DONE.')
+
+        except Exception as e:
+            self.get_logger().error(f'Handover error: {e}')
+
+        finally:
+            # 无论成功/失败，都回到 IDLE，允许下一轮
+            self.state = 'IDLE'
+            self.busy = False
+            self.P2 = None
+            self.P2_UP = None
+            self.get_logger().info('State back to IDLE, ready for another /start_handover.')
+
+    # --------- 抓取工具：P0 -> P1 -> P0 ---------
+    def prepare_tool(self):
         arm = self.arm
-
-        # ====== Step 1: P0 → P1 抓工具 → 回 P0 ======
-        self.get_logger().info('Move to P0')
+        self.get_logger().info('Prepare: Move to P0')
         move(arm, P0)
 
-        self.get_logger().info('Open gripper')
+        self.get_logger().info('Prepare: Open gripper')
         gripper_open(arm)
 
-        self.get_logger().info('Move to P1 and grip tool')
+        self.get_logger().info('Prepare: Move to P1 and grip tool')
         move(arm, P1)
 
-        self.get_logger().info('Close gripper')
+        self.get_logger().info('Prepare: Close gripper')
         gripper_close(arm)
 
-        self.get_logger().info('Back to P0')
+        self.get_logger().info('Prepare: Back to P0')
         move(arm, P0)
 
-        # ====== Step 2: ZED 检测左手稳定位置 → P2 ======
-        self.get_logger().info('Waiting for left hand stable position (ZED)...')
-        P2 = detect_left_hand_stable_then_map_to_P2()
-        self.get_logger().info(f'Got P2 from ZED: {P2}')
+    # --------- 左手话题回调：只在 WAIT_HAND 状态使用 ---------
+    def left_hand_callback(self, msg: PointStamped):
+        if self.state != "WAIT_HAND":
+            return
+        if self.P2 is not None:
+            # 已经有一个点了，本轮不再覆盖
+            return
 
-        P2_UP = dict(**P2)
-        P2_UP["z"] = min(P2["z"] + APPROACH_Z_UP, SAFE_Z_MAX)
+        x = msg.point.x  # m
+        y = msg.point.y
+        z = msg.point.z
 
-        self.get_logger().info('Move to P2_UP')
-        move(arm, P2_UP)
+        self.get_logger().info(
+            f"Received left hand point (base_link): x={x:.3f}, y={y:.3f}, z={z:.3f} (m)"
+        )
 
-        self.get_logger().info('Move to P2 (close approach)')
-        move(arm, P2, speed=CLOSE_APPROACH_SPEED, acc=CLOSE_APPROACH_ACC)
+        # 转成 mm，兼容你原来的配置
+        x_mm, y_mm, z_mm = 1000.0 * x, 1000.0 * y, 1000.0 * z
 
-        # ====== Step 3: 等人拉扯 → 用 FT 检测 → 放手 ======
-        self.get_logger().info('Waiting for pull trigger (FT)...')
+        self.P2 = dict(x=x_mm, y=y_mm, z=z_mm, **P2_ORI)
+        self.P2_UP = dict(**self.P2)
+        self.P2_UP["z"] = min(self.P2["z"] + APPROACH_Z_UP, SAFE_Z_MAX)
+
+        self.get_logger().info(f"Computed P2 (mm): {self.P2}")
+        # 状态不用在这里改，run_handover_fsm 会看到 P2 != None 然后继续执行
+
+    # --------- 执行 P2 handover + FT 检测 ---------
+    def execute_handover(self):
+        arm = self.arm
+
+        self.get_logger().info('Execute: Move to P2_UP')
+        move(arm, self.P2_UP)
+
+        self.get_logger().info('Execute: Move to P2 (close approach)')
+        move(arm, self.P2, speed=CLOSE_APPROACH_SPEED, acc=CLOSE_APPROACH_ACC)
+
+        self.get_logger().info('Execute: Waiting for pull trigger (FT)...')
         if detect_pull_then_release(arm):
             self.get_logger().info('Pull detected, gripper opened.')
-
-            # 可选：用完就关掉 FT
             try:
                 arm.ft_sensor_enable(False)
             except Exception as e:
@@ -91,9 +187,9 @@ class HandoverNode(Node):
             time.sleep(0.2)
             recover(arm)
 
-            # ====== Step 4: 抬起 → 回 P0 ======
-            self.get_logger().info('Lift up from P2 to P2_UP')
-            ret = move(arm, P2_UP, speed=160, acc=5000)
+            # 抬起
+            self.get_logger().info('Execute: Lift up from P2 to P2_UP')
+            ret = move(arm, self.P2_UP, speed=160, acc=5000)
             if ret != 0:
                 self.get_logger().warn(f'Lift failed (code={ret}), fallback relative lift')
                 code, cur = arm.get_position(is_radian=False)
@@ -105,9 +201,10 @@ class HandoverNode(Node):
                         speed=120, mvacc=4000, wait=True
                     )
                     recover(arm)
-                    move(arm, P2_UP, speed=160, acc=5000)
+                    move(arm, self.P2_UP, speed=160, acc=5000)
 
-            self.get_logger().info('Go back to P0')
+            # 回 P0
+            self.get_logger().info('Execute: Go back to P0')
             ret = move(arm, P0)
             if ret != 0:
                 self.get_logger().warn(f'Return to P0 failed (code={ret}), fallback via lift')
@@ -122,13 +219,23 @@ class HandoverNode(Node):
                     recover(arm)
                     move(arm, P0)
 
+    def destroy_node(self):
+        if self.arm:
+            try:
+                self.arm.disconnect()
+            except Exception:
+                pass
+        super().destroy_node()
+
 
 def main(args=None):
     rclpy.init(args=args)
     node = HandoverNode()
-    # 这里流程在 __init__ 里已经跑完了，所以不用 spin
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

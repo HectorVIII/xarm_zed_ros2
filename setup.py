@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'xarm_zed_handover'
 
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -25,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
         	'handover_node = xarm_zed_handover.handover_node:main',
+        	'zed_left_hand_node = xarm_zed_handover.zed_left_hand_node:main',
         ],
     },
 )
