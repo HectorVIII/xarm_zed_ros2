@@ -1,4 +1,4 @@
-# arm_handover/zed_left_hand_node.py
+import threading
 
 import cv2
 import numpy as np
@@ -18,14 +18,14 @@ class ZedLeftHandNode(Node):
     def __init__(self):
         super().__init__('zed_left_hand_node')
 
-        # 参数：发布的 topic 名字
+        # === ROS parameter ===
         self.declare_parameter('topic_name', '/left_hand/point')
         topic_name = self.get_parameter('topic_name').get_parameter_value().string_value
 
         self.publisher_ = self.create_publisher(PointStamped, topic_name, 10)
         self.get_logger().info(f'Publishing left hand on topic: {topic_name}')
 
-        # ==== 初始化 ZED ====
+        # === ZED initialize ===
         self.zed = sl.Camera()
         ip = sl.InitParameters()
         ip.camera_resolution = sl.RESOLUTION.HD720
@@ -54,32 +54,43 @@ class ZedLeftHandNode(Node):
         self.rtp = sl.RuntimeParameters()
         self.image = sl.Mat()
 
-        # 滤波 & 稳定检测状态
+        # === 手部检测状态 ===
         self.LH_IDX = 8
         self.ema = None
         self.last_ema = None
         self.stable_frames = 0
         self.published_for_this_stable = False
 
+        # 用于显示线程的当前画面（numpy 数组）
+        self.current_frame = None
+        self.frame_lock = threading.Lock()
+
         self.get_logger().info(
             f'Please extend your left hand and keep it stable for ~{STABLE_FRAMES_REQUIRED / 60:.1f} seconds …'
         )
 
-        # 使用 timer 周期性处理图像（60Hz）
+        # 60Hz timer：负责 grab + 算法 + 更新 current_frame
         self.timer = self.create_timer(1.0 / 60.0, self.process_frame)
 
+        # 单独的显示线程：负责 imshow + waitKey
+        self.viewer_thread = threading.Thread(target=self.viewer_loop, daemon=True)
+        self.viewer_running = True
+        self.viewer_thread.start()
+
+    # ==================== ZED 帧处理（逻辑线程） ====================
     def process_frame(self):
-        # 让 rclpy 控制退出
         if not rclpy.ok():
             return
 
-        # grab 一帧
         if self.zed.grab(self.rtp) != sl.ERROR_CODE.SUCCESS:
             return
 
         self.zed.retrieve_bodies(self.bodies, self.brt)
         self.zed.retrieve_image(self.image, sl.VIEW.LEFT)
         frame = self.image.get_data()
+
+        # 默认直接显示当前帧
+        display_frame = frame
 
         if self.bodies.is_new:
             for body in self.bodies.body_list:
@@ -106,28 +117,49 @@ class ZedLeftHandNode(Node):
                     if diff <= POS_TOL:
                         self.stable_frames += 1
                     else:
-                        # 手动明显移动了 → 重新计数，并允许再次发布
                         self.stable_frames = 1
                         self.published_for_this_stable = False
 
-                # 画点 + 文本
+                # 在图像上叠加 StableFrames 文本
                 cv2.putText(
                     frame,
                     f"StableFrames: {self.stable_frames}/{STABLE_FRAMES_REQUIRED}",
                     (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                     (0, 255, 0), 2
                 )
-                cv2.imshow("ZED Left Hand (ROS2)", frame)
-                cv2.waitKey(1)
+                display_frame = frame
 
                 if self.stable_frames >= STABLE_FRAMES_REQUIRED and not self.published_for_this_stable:
                     self.publish_left_hand_point(self.ema)
                     self.published_for_this_stable = True
 
-        else:
-            cv2.imshow("ZED Left Hand (ROS2)", frame)
-            cv2.waitKey(1)
+                # 只用到第一个检测到的 body
+                break
 
+        # 更新显示线程用的画面
+        with self.frame_lock:
+            self.current_frame = display_frame.copy()
+
+    # ==================== 显示线程：imshow + waitKey ====================
+    def viewer_loop(self):
+        """独立线程：持续显示 latest frame，避免被 ROS 回调阻塞。"""
+        while self.viewer_running and rclpy.ok():
+            frame = None
+            with self.frame_lock:
+                if self.current_frame is not None:
+                    frame = self.current_frame.copy()
+
+            if frame is not None:
+                cv2.imshow("ZED Left Hand (ROS2)", frame)
+            key = cv2.waitKey(1)
+            # 允许用户按 q 关闭窗口
+            if key & 0xFF == ord('q'):
+                self.get_logger().info("Viewer window closed by user (q).")
+                break
+
+        cv2.destroyAllWindows()
+
+    # ==================== 发布稳定手部点 ====================
     def publish_left_hand_point(self, lh_camera_m):
         """
         lh_camera_m: 左手在 camera 坐标系的位置 (m)
@@ -138,7 +170,7 @@ class ZedLeftHandNode(Node):
 
         msg = PointStamped()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base_link"   # 或使用你自己的 base frame 名字
+        msg.header.frame_id = "base_link"
         msg.point.x = x
         msg.point.y = y
         msg.point.z = z
@@ -148,8 +180,15 @@ class ZedLeftHandNode(Node):
             f"Published stable left hand point (base frame): x={x:.3f}, y={y:.3f}, z={z:.3f}"
         )
 
+    # ==================== 清理 ====================
     def destroy_node(self):
-        # 清理 ZED
+        self.viewer_running = False
+        # 给 viewer_loop 一点时间退出
+        try:
+            self.viewer_thread.join(timeout=1.0)
+        except Exception:
+            pass
+
         try:
             self.zed.disable_body_tracking()
             self.zed.disable_positional_tracking()
