@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
         	'handover_node = xarm_zed_handover.handover_node:main',
         	'zed_left_hand_node = xarm_zed_handover.zed_left_hand_node:main',
+        	'handover_gui = xarm_zed_handover.handover_gui_node:main'
         ],
     },
 )
