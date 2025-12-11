@@ -3,16 +3,16 @@ import time
 
 from .config import (
     GRIPPER_SPEED, OPEN_POS,
-    FT_FORCE_RELEASE_N, CHECK_PERIOD,
+    CHECK_PERIOD,
     DEBOUNCE_COUNT, ALLOW_TRIGGER_AFTER,
 )
 from .arm_utils import read_ft_wrench
 
 
-def detect_pull_then_release(arm):
+def detect_pull_then_release(arm, force_threshold_n):
     """
     使用力传感器检测“拉扯”动作：
-    |F| 连续 DEBOUNCE_COUNT 次超过阈值 FT_FORCE_RELEASE_N 时，打开夹爪并返回 True。
+    |F| 连续 DEBOUNCE_COUNT 次超过阈值 force_threshold_n 时，打开夹爪并返回 True。
     """
     print("[INFO] Waiting for pull trigger (FT mode)...")
 
@@ -39,13 +39,13 @@ def detect_pull_then_release(arm):
         Fx, Fy, Fz = wrench[:3]
         F_total = (Fx * Fx + Fy * Fy + Fz * Fz) ** 0.5
 
-        if F_total >= FT_FORCE_RELEASE_N:
+        if F_total >= force_threshold_n:
             hits += 1
         else:
             hits = 0
 
         if hits >= DEBOUNCE_COUNT:
-            print(f"[TRIGGERED] |F|={F_total:.2f} N ≥ {FT_FORCE_RELEASE_N:.1f} N → opening gripper.")
+            print(f"[TRIGGERED] |F|={F_total:.2f} N ≥ {force_threshold_n:.1f} N → opening gripper.")
             arm.set_gripper_speed(GRIPPER_SPEED)
             arm.set_gripper_position(OPEN_POS, wait=True)
             return True

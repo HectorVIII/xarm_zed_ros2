@@ -58,7 +58,7 @@ POS_TOL = 0.012          # Stability threshold (meter)
 STABLE_FRAMES_REQUIRED = 120  # Consecutive stable frames
 
 # ================= Pull-and-Release Detection Parameters  =================
-FT_FORCE_RELEASE_N = 15.0     # N: Force threshold to trigger release
+FT_FORCE_RELEASE_N = 2.0     # N: Force threshold to trigger release
 CHECK_PERIOD = 0.03          # seconds
 DEBOUNCE_COUNT = 4           # number of consecutive triggers to confirm
 ALLOW_TRIGGER_AFTER = 0.5    # seconds to wait before allowing trigger 

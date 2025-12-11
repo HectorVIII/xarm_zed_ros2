@@ -7,6 +7,7 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped
 from std_srvs.srv import Trigger
+from rcl_interfaces.msg import SetParametersResult
 from xarm.wrapper import XArmAPI
 
 from .config import (
@@ -16,6 +17,7 @@ from .config import (
     APPROACH_Z_UP, SAFE_Z_MAX,
     CLOSE_APPROACH_SPEED, CLOSE_APPROACH_ACC,
     P2_ORI,
+    FT_FORCE_RELEASE_N,
 )
 
 from .arm_utils import recover, move, gripper_open, gripper_close
@@ -34,6 +36,12 @@ class HandoverNode(Node):
         # ==== 连接机械臂 ====
         self.declare_parameter('robot_ip', ROBOT_IP)
         robot_ip = self.get_parameter('robot_ip').get_parameter_value().string_value
+
+        self.declare_parameter('release_force_threshold', FT_FORCE_RELEASE_N)
+        self.release_force_threshold = self.get_parameter('release_force_threshold').value
+        self.add_on_set_parameters_callback(self.on_parameters_set)
+
+        self.get_logger().info(f'Initial release_force_threshold = {self.release_force_threshold:.2f} N')
 
         self.get_logger().info(f'Connecting to xArm at {robot_ip} ...')
         self.arm = XArmAPI(robot_ip, is_radian=False)
@@ -163,6 +171,7 @@ class HandoverNode(Node):
         )
 
         # 转成 mm，兼容你原来的配置
+
         x_mm, y_mm, z_mm = 1000.0 * x, 1000.0 * y, 1000.0 * z
 
         # 在 base 坐标系下对 Y 做一个固定偏移，补偿“总是偏左约 2cm”
@@ -188,7 +197,7 @@ class HandoverNode(Node):
         move(arm, self.P2, speed=CLOSE_APPROACH_SPEED, acc=CLOSE_APPROACH_ACC)
 
         self.get_logger().info('Execute: Waiting for pull trigger (FT)...')
-        if detect_pull_then_release(arm):
+        if detect_pull_then_release(arm, self.release_force_threshold):
             self.get_logger().info('Pull detected, gripper opened.')
             try:
                 arm.ft_sensor_enable(False)
@@ -230,6 +239,15 @@ class HandoverNode(Node):
                     recover(arm)
                     move(arm, P0)
 
+    def on_parameters_set(self, params):
+        for param in params:
+            if param.name == 'release_force_threshold':
+                self.release_force_threshold = float(param.value)
+                self.get_logger().info(
+                    f'Updated release_force_threshold to {self.release_force_threshold:.2f} N'
+                )
+        return SetParametersResult(successful=True)
+
     def destroy_node(self):
         if self.arm:
             try:
@@ -251,4 +269,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
