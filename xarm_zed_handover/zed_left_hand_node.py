@@ -55,7 +55,7 @@ class ZedRightHandNode(Node):
         self.image = sl.Mat()
 
         # === 手部检测状态 ===
-        self.RH_IDX = 11  # BODY_34 right hand index
+        self.RH_IDX = 15  # BODY_34 right hand index
         self.ema = None
         self.last_ema = None
         self.stable_frames = 0

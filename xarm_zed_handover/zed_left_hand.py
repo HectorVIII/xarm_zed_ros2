@@ -42,7 +42,7 @@ def detect_right_hand_stable_then_map_to_P2():
     rtp = sl.RuntimeParameters()
     image = sl.Mat()
 
-    RH_IDX = 11  # Right hand keypoint index in BODY_34
+    RH_IDX = 15  # Right hand keypoint index in BODY_34
     ema = None
     last_ema = None
     stable_frames = 0

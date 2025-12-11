@@ -17,9 +17,15 @@ from .config import (
     CLOSE_APPROACH_SPEED, CLOSE_APPROACH_ACC,
     P2_ORI,
 )
+
 from .arm_utils import recover, move, gripper_open, gripper_close
 from .pull_release import detect_pull_then_release
 
+# 交接点在 base 坐标系下的手动偏移（单位：mm）
+# 如果发现改完之后从“偏左 2cm”变成“偏右 2cm”，就把 -20.0 改成 +20.0
+P2_X_BIAS_MM = -120.0
+P2_Z_BIAS_MM = 40.0
+P2_Y_BIAS_MM = -40
 
 class HandoverNode(Node):
     def __init__(self):
@@ -158,6 +164,11 @@ class HandoverNode(Node):
 
         # 转成 mm，兼容你原来的配置
         x_mm, y_mm, z_mm = 1000.0 * x, 1000.0 * y, 1000.0 * z
+
+        # 在 base 坐标系下对 Y 做一个固定偏移，补偿“总是偏左约 2cm”
+        x_mm += P2_X_BIAS_MM
+        z_mm += P2_Z_BIAS_MM
+        y_mm += P2_Y_BIAS_MM
 
         self.P2 = dict(x=x_mm, y=y_mm, z=z_mm, **P2_ORI)
         self.P2_UP = dict(**self.P2)
