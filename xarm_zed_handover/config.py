@@ -42,7 +42,7 @@ R_cb = np.array([
 t_cb = np.array([1.44587977, 0.37286003, 0.32676220])   # Translation from camera to base
 """
 
-# ================= Left Hand Detection Parameters =================
+# ================= Right Hand Detection Parameters =================
 CONF_THR = 0.60          # Confidence threshold
 EMA_ALPHA = 0.7          # Smoothing factor
 POS_TOL = 0.012          # Stability threshold (meter)

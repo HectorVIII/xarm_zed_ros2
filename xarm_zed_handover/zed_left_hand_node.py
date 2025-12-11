@@ -14,16 +14,16 @@ from .config import (
 )
 
 
-class ZedLeftHandNode(Node):
+class ZedRightHandNode(Node):
     def __init__(self):
-        super().__init__('zed_left_hand_node')
+        super().__init__('zed_right_hand_node')
 
         # === ROS parameter ===
-        self.declare_parameter('topic_name', '/left_hand/point')
+        self.declare_parameter('topic_name', '/right_hand/point')
         topic_name = self.get_parameter('topic_name').get_parameter_value().string_value
 
         self.publisher_ = self.create_publisher(PointStamped, topic_name, 10)
-        self.get_logger().info(f'Publishing left hand on topic: {topic_name}')
+        self.get_logger().info(f'Publishing right hand on topic: {topic_name}')
 
         # === ZED initialize ===
         self.zed = sl.Camera()
@@ -55,7 +55,7 @@ class ZedLeftHandNode(Node):
         self.image = sl.Mat()
 
         # === 手部检测状态 ===
-        self.LH_IDX = 8
+        self.RH_IDX = 11  # BODY_34 right hand index
         self.ema = None
         self.last_ema = None
         self.stable_frames = 0
@@ -66,7 +66,7 @@ class ZedLeftHandNode(Node):
         self.frame_lock = threading.Lock()
 
         self.get_logger().info(
-            f'Please extend your left hand and keep it stable for ~{STABLE_FRAMES_REQUIRED / 60:.1f} seconds …'
+            f'Please extend your right hand and keep it stable for ~{STABLE_FRAMES_REQUIRED / 60:.1f} seconds …'
         )
 
         # 60Hz timer：负责 grab + 算法 + 更新 current_frame
@@ -95,18 +95,18 @@ class ZedLeftHandNode(Node):
         if self.bodies.is_new:
             for body in self.bodies.body_list:
                 kc = body.keypoint_confidence
-                if len(kc) <= self.LH_IDX or kc[self.LH_IDX] <= CONF_THR:
+                if len(kc) <= self.RH_IDX or kc[self.RH_IDX] <= CONF_THR:
                     continue
 
-                lh = np.array(body.keypoint[self.LH_IDX], dtype=float)  # m
-                if np.any(np.isnan(lh)):
+                rh = np.array(body.keypoint[self.RH_IDX], dtype=float)  # m
+                if np.any(np.isnan(rh)):
                     continue
 
                 # EMA smoothing
                 if self.ema is None:
-                    self.ema = lh
+                    self.ema = rh
                 else:
-                    self.ema = EMA_ALPHA * lh + (1.0 - EMA_ALPHA) * self.ema
+                    self.ema = EMA_ALPHA * rh + (1.0 - EMA_ALPHA) * self.ema
 
                 if self.last_ema is None:
                     self.last_ema = self.ema.copy()
@@ -130,7 +130,7 @@ class ZedLeftHandNode(Node):
                 display_frame = frame
 
                 if self.stable_frames >= STABLE_FRAMES_REQUIRED and not self.published_for_this_stable:
-                    self.publish_left_hand_point(self.ema)
+                    self.publish_right_hand_point(self.ema)
                     self.published_for_this_stable = True
 
                 # 只用到第一个检测到的 body
@@ -150,7 +150,7 @@ class ZedLeftHandNode(Node):
                     frame = self.current_frame.copy()
 
             if frame is not None:
-                cv2.imshow("ZED Left Hand (ROS2)", frame)
+                cv2.imshow("ZED Right Hand (ROS2)", frame)
             key = cv2.waitKey(1)
             # 允许用户按 q 关闭窗口
             if key & 0xFF == ord('q'):
@@ -160,12 +160,12 @@ class ZedLeftHandNode(Node):
         cv2.destroyAllWindows()
 
     # ==================== 发布稳定手部点 ====================
-    def publish_left_hand_point(self, lh_camera_m):
+    def publish_right_hand_point(self, rh_camera_m):
         """
-        lh_camera_m: 左手在 camera 坐标系的位置 (m)
+        rh_camera_m: 右手在 camera 坐标系的位置 (m)
         使用 R_cb, t_cb 变到 base 坐标系，然后发布 PointStamped (单位 m)
         """
-        p_base_m = R_cb @ lh_camera_m + t_cb
+        p_base_m = R_cb @ rh_camera_m + t_cb
         x, y, z = p_base_m.tolist()
 
         msg = PointStamped()
@@ -177,7 +177,7 @@ class ZedLeftHandNode(Node):
 
         self.publisher_.publish(msg)
         self.get_logger().info(
-            f"Published stable left hand point (base frame): x={x:.3f}, y={y:.3f}, z={z:.3f}"
+            f"Published stable right hand point (base frame): x={x:.3f}, y={y:.3f}, z={z:.3f}"
         )
 
     # ==================== 清理 ====================
@@ -201,7 +201,7 @@ class ZedLeftHandNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = ZedLeftHandNode()
+    node = ZedRightHandNode()
     try:
         rclpy.spin(node)
     finally:

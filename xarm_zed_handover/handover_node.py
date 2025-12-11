@@ -44,17 +44,17 @@ class HandoverNode(Node):
         self.P2 = None
         self.P2_UP = None
 
-        # ==== 订阅左手点 ====
-        self.declare_parameter('left_hand_topic', '/left_hand/point')
-        topic = self.get_parameter('left_hand_topic').get_parameter_value().string_value
+        # ==== 订阅右手点 ====
+        self.declare_parameter('right_hand_topic', '/right_hand/point')
+        topic = self.get_parameter('right_hand_topic').get_parameter_value().string_value
 
-        self.left_hand_sub = self.create_subscription(
+        self.right_hand_sub = self.create_subscription(
             PointStamped,
             topic,
-            self.left_hand_callback,
+            self.right_hand_callback,
             10
         )
-        self.get_logger().info(f'Subscribing left hand from topic: {topic}')
+        self.get_logger().info(f'Subscribing right hand from topic: {topic}')
 
         # ==== 创建 /start_handover Service ====
         self.srv = self.create_service(Trigger, 'start_handover', self.start_handover_cb)
@@ -88,16 +88,16 @@ class HandoverNode(Node):
             self.state = 'PREPARE'
             self.prepare_tool()
 
-            # 2) 等待稳定左手点
+            # 2) 等待稳定右手点
             self.state = 'WAIT_HAND'
-            self.get_logger().info('Waiting for stable left hand point...')
+            self.get_logger().info('Waiting for stable right hand point...')
 
             wait_start = time.time()
             while rclpy.ok() and self.P2 is None:
                 time.sleep(0.05)
                 # 可选：超时保护
                 if time.time() - wait_start > 60.0:  # 超过 60s 还没等到就退出
-                    self.get_logger().warn('Timeout waiting for left hand point, aborting handover.')
+                    self.get_logger().warn('Timeout waiting for right hand point, aborting handover.')
                     return
 
             if self.P2 is None:
@@ -140,8 +140,8 @@ class HandoverNode(Node):
         self.get_logger().info('Prepare: Back to P0')
         move(arm, P0)
 
-    # --------- 左手话题回调：只在 WAIT_HAND 状态使用 ---------
-    def left_hand_callback(self, msg: PointStamped):
+    # --------- 右手话题回调：只在 WAIT_HAND 状态使用 ---------
+    def right_hand_callback(self, msg: PointStamped):
         if self.state != "WAIT_HAND":
             return
         if self.P2 is not None:
@@ -153,7 +153,7 @@ class HandoverNode(Node):
         z = msg.point.z
 
         self.get_logger().info(
-            f"Received left hand point (base_link): x={x:.3f}, y={y:.3f}, z={z:.3f} (m)"
+            f"Received right hand point (base_link): x={x:.3f}, y={y:.3f}, z={z:.3f} (m)"
         )
 
         # 转成 mm，兼容你原来的配置

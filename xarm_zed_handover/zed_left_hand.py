@@ -1,4 +1,4 @@
-# zed_left_hand.py
+# zed_left_hand.py (now configured for right-hand detection)
 import cv2
 import numpy as np
 import pyzed.sl as sl
@@ -9,9 +9,9 @@ from .config import (
 )
 
 
-def detect_left_hand_stable_then_map_to_P2():
+def detect_right_hand_stable_then_map_to_P2():
     """
-    Detect left hand stable for ≥ N frames, then map to base coordinates (mm).
+    Detect right hand stable for ≥ N frames, then map to base coordinates (mm).
     返回: P2 = dict(x=..., y=..., z=..., roll=..., pitch=..., yaw=...)
     """
     zed = sl.Camera()
@@ -33,7 +33,7 @@ def detect_left_hand_stable_then_map_to_P2():
     btp.enable_tracking = True
     btp.enable_body_fitting = False
     btp.detection_model = sl.BODY_TRACKING_MODEL.HUMAN_BODY_FAST
-    btp.body_format = sl.BODY_FORMAT.BODY_34   # Compatible: BODY_34 keeps left hand index=8
+    btp.body_format = sl.BODY_FORMAT.BODY_34   # Compatible: BODY_34 keeps right hand index=11
     zed.enable_body_tracking(btp)
 
     bodies = sl.Bodies()
@@ -42,12 +42,12 @@ def detect_left_hand_stable_then_map_to_P2():
     rtp = sl.RuntimeParameters()
     image = sl.Mat()
 
-    LH_IDX = 8  # Left hand keypoint index in BODY_34
+    RH_IDX = 11  # Right hand keypoint index in BODY_34
     ema = None
     last_ema = None
     stable_frames = 0
 
-    print(f"Please extend your left hand and keep it stable for ~{STABLE_FRAMES_REQUIRED / 60:.1f} seconds …")
+    print(f"Please extend your right hand and keep it stable for ~{STABLE_FRAMES_REQUIRED / 60:.1f} seconds …")
 
     try:
         while True:
@@ -63,13 +63,13 @@ def detect_left_hand_stable_then_map_to_P2():
             if bodies.is_new:
                 for body in bodies.body_list:
                     kc = body.keypoint_confidence
-                    if len(kc) > LH_IDX and kc[LH_IDX] > CONF_THR:
-                        lh = np.array(body.keypoint[LH_IDX], dtype=float)  # m
-                        if np.any(np.isnan(lh)):
+                    if len(kc) > RH_IDX and kc[RH_IDX] > CONF_THR:
+                        rh = np.array(body.keypoint[RH_IDX], dtype=float)  # m
+                        if np.any(np.isnan(rh)):
                             continue
 
                         # EMA smoothing
-                        ema = lh if ema is None else EMA_ALPHA * lh + (1 - EMA_ALPHA) * ema
+                        ema = rh if ema is None else EMA_ALPHA * rh + (1 - EMA_ALPHA) * ema
 
                         if last_ema is None:
                             last_ema = ema.copy()
@@ -89,12 +89,12 @@ def detect_left_hand_stable_then_map_to_P2():
                             (30, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
                             (0, 255, 0), 2
                         )
-                        cv2.imshow("ZED Left Hand Fast (BODY_34)", frame)
+                        cv2.imshow("ZED Right Hand Fast (BODY_34)", frame)
                         cv2.waitKey(1)
 
                         # Trigger when stable frames reach threshold
                         if stable_frames >= STABLE_FRAMES_REQUIRED:
-                            print(f"Left hand stable ：{ema}")
+                            print(f"Right hand stable ：{ema}")
                             # Camera(m) -> Base(m) -> (mm)
                             p_base_m = R_cb @ ema + t_cb
                             x_mm, y_mm, z_mm = 1000 * p_base_m[0], 1000 * p_base_m[1], 1000 * p_base_m[2]
@@ -104,7 +104,7 @@ def detect_left_hand_stable_then_map_to_P2():
                             return P2
 
             # 仍然显示画面，避免窗口卡死
-            cv2.imshow("ZED Left Hand Fast (BODY_34)", frame)
+            cv2.imshow("ZED Right Hand Fast (BODY_34)", frame)
             if cv2.waitKey(1) == ord('q'):
                 break
 
