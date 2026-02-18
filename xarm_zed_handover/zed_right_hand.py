@@ -1,4 +1,3 @@
-# zed_left_hand.py (now configured for right-hand detection)
 import cv2
 import numpy as np
 import pyzed.sl as sl
