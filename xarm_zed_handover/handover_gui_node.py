@@ -11,6 +11,8 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rcl_interfaces.msg import Parameter as ParamMsg, ParameterValue, ParameterType
 
 from std_srvs.srv import Trigger
+from std_msgs.msg import Bool
+
 
 
 class HandoverGUI(Node):
@@ -18,12 +20,19 @@ class HandoverGUI(Node):
         super().__init__('handover_gui')
 
         # 1) /start_handover service client
-        self.cli = self.create_client(Trigger, 'start_handover')
-        self.get_logger().info('Waiting for /start_handover service ...')
-        while not self.cli.wait_for_service(timeout_sec=1.0):
-            self.get_logger().warn('/start_handover service not available, waiting...')
+        # self.cli = self.create_client(Trigger, 'start_handover')
+        # self.get_logger().info('Waiting for /start_handover service ...')
+        # while not self.cli.wait_for_service(timeout_sec=1.0):
+        #     self.get_logger().warn('/start_handover service not available, waiting...')
 
-        self.get_logger().info('Connected to /start_handover service.')
+        # self.get_logger().info('Connected to /start_handover service.')
+        
+        # ✅ 新增：发布给 SMACC2 的 /handover/start 话题
+        self.start_pub = self.create_publisher(Bool, '/handover/start', 10)
+
+        self.release_force_threshold = 7.0
+        self.last_sent_threshold = 7.0
+        self.last_send_time = 0.0
 
         # 2) handover_node 参数服务 client
         #    默认节点名是 handover_node -> 服务名: /handover_node/get_parameters, /handover_node/set_parameters
@@ -217,25 +226,18 @@ class HandoverGUI(Node):
         cv2.destroyWindow(win_name)
 
     def call_start_handover(self):
-        """异步调用 /start_handover。"""
-        req = Trigger.Request()
-        future = self.cli.call_async(req)
+        """触发 handover：只通知 SMACC2，不再调用旧的 /start_handover service。"""
 
-        def cb(fut):
-            try:
-                resp = fut.result()
-                self.get_logger().info(
-                    f"/start_handover response: success={resp.success}, message='{resp.message}'"
-                )
-                if resp.success:
-                    self.info_text = "Handover started."
-                else:
-                    self.info_text = f"Failed: {resp.message}"
-            except Exception as e:
-                self.get_logger().error(f"Service call failed: {e}")
-                self.info_text = f"Error: {e}"
+        # 只给 SMACC2 发送 /handover/start = True
+        msg = Bool()
+        msg.data = True
+        self.start_pub.publish(msg)
+        self.get_logger().info("GUI: published /handover/start = True")
 
-        future.add_done_callback(cb)
+        # 可选：更新 GUI 上的提示文字
+        self.info_text = "SMACC2 handover requested."
+
+
 
     def destroy_node(self):
         self.running = False
