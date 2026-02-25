@@ -1,5 +1,5 @@
 import time
-import threading
+import threading    # For running the old FSM in a separate thread, and for locks to protect arm access and shared variables
 
 import rclpy
 from rclpy.node import Node
@@ -28,7 +28,7 @@ from .config import (
 from .arm_utils import recover, move, gripper_open, gripper_close
 from .pull_release import detect_pull_then_release
 
-# 交接点在 base 坐标系下的手动偏移（单位：mm）
+# Manual offsets of the handover point in the base coordinate system (unit: mm)
 P2_X_BIAS_MM = -120.0
 P2_Y_BIAS_MM = -40.0
 P2_Z_BIAS_MM = 40.0
@@ -38,8 +38,8 @@ class HandoverNode(Node):
     def __init__(self):
         super().__init__("handover_node")
 
-        # --- 锁 & SMACC2 相关 publisher / service ---
-        self.arm_lock = threading.Lock()
+        # --- Locks & SMACC2 related publishers / services ---
+        self.arm_lock = threading.Lock()    #
         self.hand_ready_pub = self.create_publisher(Bool, "/handover/hand_ready", 10)
 
         self.srv_prepare = self.create_service(
@@ -52,44 +52,41 @@ class HandoverNode(Node):
             Trigger, "/handover/execute_handover", self.cb_execute_handover
         )
 
-        # --- 参数 ---
-        self.declare_parameter("robot_ip", ROBOT_IP)
-        robot_ip = self.get_parameter("robot_ip").get_parameter_value().string_value
+        # --- robotics arm ip setting ---
+        self.declare_parameter("robot_ip", ROBOT_IP)    # Declare the parameter 'robot_ip' with a default value from ROBOT_IP of config.py
+        robot_ip = self.get_parameter("robot_ip").get_parameter_value().string_value    # Retrieve the parameter value and convert it to a string for use
+        #example: ros2 run xarm_zed_handover handover_node --ros-args -p robot_ip:="192.168.1.155"
+        
+        # -- Force threshold parameter for pull-and-release detection, with dynamic reconfigure support ---
+        self.declare_parameter("release_force_threshold", FT_FORCE_RELEASE_N)   # Declare the parameter 'release_force_threshold' with a default value from FT_FORCE_RELEASE_N of config.py
+        self.release_force_threshold = self.get_parameter("release_force_threshold").value  # Retrieve the parameter value and store it in self.release_force_threshold for use in the handover logic
+        # Register the callback function self.on_parameters_set to be called whenever parameters are set, 
+        # allowing dynamic updates to parameters like release_force_threshold at runtime through ROS2 parameter services or command line tools.
+        self.add_on_set_parameters_callback(self.on_parameters_set) 
+        self.get_logger().info(f"Initial release_force_threshold = {self.release_force_threshold:.2f} N")   # Log the initial value of the release force threshold for verification
 
-        self.declare_parameter("release_force_threshold", FT_FORCE_RELEASE_N)
-        self.release_force_threshold = self.get_parameter(
-            "release_force_threshold"
-        ).value
-        self.add_on_set_parameters_callback(self.on_parameters_set)
-
-        self.get_logger().info(
-            f"Initial release_force_threshold = {self.release_force_threshold:.2f} N"
-        )
-
-        # --- 连接机械臂 ---
+        # --- Connect to the robotic arm ---
         self.get_logger().info(f"Connecting to xArm at {robot_ip} ...")
-        self.arm = XArmAPI(robot_ip, is_radian=False)
+        self.arm = XArmAPI(robot_ip, is_radian=False)   # Connect to the xArm using the IP address specified in the parameters, with angles in degrees (is_radian=False)
+        self.arm.connect()
+        if self.arm.connected:
+            self.get_logger().info("Successfully connected to xArm.")
+            try:
+                # try to recover the arm state first in case it's in an error/warn state.
+                recover(self.arm)
+                self.get_logger().info("xArm state recovered and ready for motion.")
+            except Exception as e:
+                self.get_logger().error(f"Connected, but failed to recover arm: {e}")
+        else:
+            self.get_logger().error(f"Failed to connect to xArm at {robot_ip}. Please check the network or IP.")
 
-        # 比较稳妥的初始化顺序：先清错、启用、恢复模式
-        self.arm.clean_warn()
-        self.arm.clean_error()
-        self.arm.motion_enable(True)
-        try:
-            # recover 里一般会 set_mode/set_state，确保可以运动
-            recover(self.arm)
-            self.get_logger().info("Called recover() on arm at startup.")
-        except Exception as e:
-            self.get_logger().warn(f"recover() at startup failed: {e}")
-
-        self.get_logger().info("xArm connected.")
-
-        # --- 状态变量 ---
+        # --- State variables ---
         self.state = "IDLE"
-        self.busy = False  # 仅用于旧的 /start_handover FSM
+        self.busy = False  # Only used for the old /start_handover FSM
         self.P2 = None
         self.P2_UP = None
 
-        # --- ZED 右手订阅 ---
+        # --- ZED right hand subscription ---
         self.right_hand_sub = None
         self.latest_hand_point = None
         self.right_hand_lock = threading.Lock()
@@ -102,13 +99,13 @@ class HandoverNode(Node):
         )
         self.get_logger().info(f"Subscribing right hand from topic: {topic}")
 
-        # --- 旧的一条龙 service: /start_handover（可以保留给你单独调试用） ---
+        # --- Old all-in-one service: /start_handover (can be kept for standalone debugging) ---
         self.srv = self.create_service(
             Trigger, "start_handover", self.start_handover_cb
         )
         self.get_logger().info("Service /start_handover ready. State = IDLE.")
 
-    # ========== 旧的一条龙 FSM，用于兼容 ==========
+    # ========== Old all-in-one FSM, for compatibility ==========
     def start_handover_cb(self, request, response):
         if self.busy:
             response.success = False
@@ -169,18 +166,18 @@ class HandoverNode(Node):
             self.P2_UP = None
             self.get_logger().info("State back to IDLE, ready for another /start_handover.")
 
-    # ========== 核心动作函数 ==========
+    # ========== Core action functions ==========
     def prepare_tool(self):
-        """P0 -> P1 抓工具 -> 回 P0
+        """P0 -> P1 grasp tool -> back to P0
 
-        在 SMACC2 同步 service 和旧 FSM 中都会被调用。
+        Called in both SMACC2 synchronous service and the old FSM.
         """
         arm = self.arm
 
         self.get_logger().info("[prepare_tool] Calling recover() before motion.")
         recover(arm)
 
-        # 打印当前位置，方便排查
+        # Print current position for easy troubleshooting
         code, cur = arm.get_position(is_radian=False)
         if code == 0 and cur:
             self.get_logger().info(
@@ -191,13 +188,13 @@ class HandoverNode(Node):
                 f"[prepare_tool] get_position failed before P0, code={code}"
             )
 
-        # ---- 封装一个安全的 move，遇到错误先打 log 再 recover 重试 ----
+        # ---- Encapsulate a safe move: log error, recover, and retry if failed ----
         def safe_move(target, desc: str, speed=None, acc=None):
             self.get_logger().info(f"[prepare_tool] Move to {desc}")
             ret = move(arm, target, speed=speed, acc=acc)
             self.get_logger().info(f"[prepare_tool] move to {desc} ret={ret}")
             if ret != 0:
-                # 多打印一些状态信息
+                # Print more state information
                 st = arm.get_state()
                 err_warn = arm.get_err_warn_code()
                 self.get_logger().warn(
@@ -210,27 +207,27 @@ class HandoverNode(Node):
                     f"[prepare_tool] move to {desc} after recover ret={ret2}"
                 )
                 if ret2 != 0:
-                    # 这里才真正抛异常，让你在 log 里看到完整信息
+                    # Truly raise exception here so full info is visible in the log
                     raise RuntimeError(
                         f"move to {desc} failed after recover, code={ret2}, "
                         f"state={st}, err_warn={err_warn}"
                     )
 
-        # 1) P0
+        # 1) Move to P0
         safe_move(P0, "P0")
 
-        # 2) 张开夹爪
+        # 2) Open gripper
         self.get_logger().info("[prepare_tool] Open gripper")
         gripper_open(arm)
 
-        # 3) P1（工具台）
+        # 3) Move to P1 (tool tray)
         safe_move(P1, "P1 (tool tray)")
 
-        # 4) 合上夹爪
+        # 4) Close gripper to grasp tool
         self.get_logger().info("[prepare_tool] Close gripper to grasp tool")
         gripper_close(arm)
 
-        # 5) 回 P0
+        # 5) Back to P0
         safe_move(P0, "P0 (back with tool)")
 
         code, cur = arm.get_position(is_radian=False)
@@ -243,7 +240,7 @@ class HandoverNode(Node):
 
 
     def right_hand_callback(self, msg: PointStamped):
-        # 只在 WAIT_HAND 状态下更新
+        # Only update in WAIT_HAND state
         if self.state != "WAIT_HAND":
             return
 
@@ -255,15 +252,15 @@ class HandoverNode(Node):
         y = msg.point.y * 1000.0
         z = msg.point.z * 1000.0
 
-        # 手动偏移
+        # Manual offsets
         x += P2_X_BIAS_MM
         y += P2_Y_BIAS_MM
         z += P2_Z_BIAS_MM
 
-        # 限制 z 在安全范围
+        # Limit z within safe range
         z = max(0.0, min(z, SAFE_Z_MAX))
 
-        # ✅ 姿态沿用 P0，只改 xyz
+        # ✅ Keep P0 orientation, only change xyz
         roll = P0["roll"]
         pitch = P0["pitch"]
         yaw = P0["yaw"]
@@ -288,7 +285,7 @@ class HandoverNode(Node):
 
         self.get_logger().info(f"[right_hand] P2 = {self.P2}, P2_UP = {self.P2_UP}")
 
-        # 告诉 SMACC2：手准备好了
+        # Tell SMACC2: hand is ready
         msg_bool = Bool()
         msg_bool.data = True
         self.hand_ready_pub.publish(msg_bool)
@@ -304,11 +301,11 @@ class HandoverNode(Node):
 
         self.get_logger().info("[execute_handover] Start handover motion")
 
-        # 1) 先回到 P0（保证起点一致）
+        # 1) Return to P0 first (ensure consistent starting point)
         self.get_logger().info("[execute_handover] Ensure at P0")
         move(arm, P0)
 
-        # 2) 去 P2_UP（手的上方一点）
+        # 2) Move to P2_UP (slightly above the hand)
         self.get_logger().info("[execute_handover] Move to P2_UP")
         ret = move(arm, self.P2_UP, speed=160, acc=5000)
         self.get_logger().info(f"[execute_handover] move to P2_UP ret={ret}")
@@ -322,7 +319,7 @@ class HandoverNode(Node):
                 f"[execute_handover] move to P2_UP after recover ret={ret2}"
             )
 
-        # 3) 从 P2_UP 慢速接近 P2（交接点）
+        # 3) Slowly approach P2 (handover point) from P2_UP
         self.get_logger().info("[execute_handover] Approach P2 from P2_UP (slow)")
         ret = move(
             arm,
@@ -351,7 +348,7 @@ class HandoverNode(Node):
                     wait=True,
                 )
 
-        # 4) 力传感器检测 + 释放
+        # 4) Force/Torque sensor detection + release
         self.get_logger().info(
             "[execute_handover] Start FT-based pull detection and release"
         )
@@ -359,7 +356,7 @@ class HandoverNode(Node):
             arm.ft_sensor_enable(True)
             arm.ft_sensor_set_zero()
 
-            # ✅ 这里完全按 pull_release.py 的定义来，只传两个参数
+            # ✅ Follow the definition in pull_release.py exactly, passing only two parameters
             # def detect_pull_then_release(arm, force_threshold_n):
             triggered = detect_pull_then_release(
                 arm,
@@ -375,7 +372,7 @@ class HandoverNode(Node):
                     "[execute_handover] FT trigger detected, gripper opened."
                 )
         finally:
-            # 不管有没有触发，都要关掉 FT、恢复状态并抬回 P2_UP / P0
+            # Regardless of trigger, disable FT, recover state, and lift back to P2_UP / P0
             try:
                 arm.ft_sensor_enable(False)
             except Exception as e:
@@ -402,8 +399,7 @@ class HandoverNode(Node):
         self.get_logger().info("[execute_handover] Handover finished.")
 
 
-
-    # ========== 参数回调 ==========
+    # ========== Parameter callbacks ==========
     def on_parameters_set(self, params):
         for param in params:
             if param.name == "release_force_threshold":
@@ -413,9 +409,9 @@ class HandoverNode(Node):
                 )
         return SetParametersResult(successful=True)
 
-    # ========== SMACC2 对接的 3 个 service ==========
+    # ========== 3 services connected to SMACC2 ==========
     def cb_prepare_tool(self, request, response):
-        """SMACC2: 同步版 /handover/prepare_tool"""
+        """SMACC2: Synchronous version of /handover/prepare_tool"""
         if self.busy:
             response.success = False
             response.message = "Node busy (start_handover running)."
@@ -449,7 +445,7 @@ class HandoverNode(Node):
         return response
 
     def cb_execute_handover(self, request, response):
-        """SMACC2: 同步版 /handover/execute_handover"""
+        """SMACC2: Synchronous version of /handover/execute_handover"""
         if self.busy:
             response.success = False
             response.message = "Node busy (start_handover running)."
@@ -473,7 +469,7 @@ class HandoverNode(Node):
                 response.message = f"execute_handover exception: {e}"
         return response
 
-    # ========== 销毁 ==========
+    # ========== Destroy ==========
     def destroy_node(self):
         if self.arm:
             try:

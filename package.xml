@@ -10,9 +10,7 @@
   <maintainer email="jszdhyjs@gmail.com">huitao</maintainer>
   <license>Apache License 2.0</license>
 
-  <!-- ======================
-       DEPENDENCIES
-       ====================== -->
+  <!-- ======================   DEPENDENCIES       ====================== -->
   <!-- Python client library -->
   <exec_depend>rclpy</exec_depend>
 
@@ -22,12 +20,7 @@
   <!-- Service Trigger -->
   <exec_depend>std_srvs</exec_depend>
 
-  <!-- 你使用 xArmAPI (python) — 不属于 ROS2 包，不需要声明 -->
-  <!-- 你使用 ZED SDK (python) — 不在 ROS 依赖中，也不写进来 -->
-
-  <!-- ======================
-       TEST
-       ====================== -->
+  <!-- Testing dependencies -->
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
