@@ -24,14 +24,15 @@ from .config import (
     CHECK_PERIOD,
     DEBOUNCE_COUNT,
     ALLOW_TRIGGER_AFTER,
+    MAX_JOINT_SPEED,
 )
 from .arm_utils import recover, move, gripper_open, gripper_close
 from .pull_release import detect_pull_then_release
 
-# Manual offsets of the handover point in the base coordinate system (unit: mm)
-P2_X_BIAS_MM = -120.0
-P2_Y_BIAS_MM = -40.0
-P2_Z_BIAS_MM = 40.0
+#Manual offsets of the handover point in the base coordinate system (unit: mm)
+P2_X_BIAS_MM = 0
+P2_Y_BIAS_MM = 0
+P2_Z_BIAS_MM = 0
 
 
 class HandoverNode(Node):
@@ -80,22 +81,36 @@ class HandoverNode(Node):
         else:
             self.get_logger().error(f"Failed to connect to xArm at {robot_ip}. Please check the network or IP.")
 
+        self.arm.set_gripper_enable(True)   # Enable the gripper
+        self.arm.set_gripper_mode(0)    # Set gripper mode to 0 (position control mode)
+        self.arm.set_gripper_speed(GRIPPER_SPEED)   # Set the gripper speed to the value specified in GRIPPER_SPEED of config.py
+
+        # ----------------- 新增：全局关节速度限制配置 -----------------
+        # 设置缩减模式下的最大关节速度为 60 度/秒，并开启缩减模式(安全边界)
+        self.arm.set_reduced_max_joint_speed(MAX_JOINT_SPEED)
+        self.arm.set_reduced_mode(True)
+        self.get_logger().info(f"xArm Reduced Mode enabled: Max joint speed limited to {MAX_JOINT_SPEED} deg/s.")
+        # -------------------------------------------------------------
+
         # --- State variables ---
         self.state = "IDLE"
-        self.busy = False  # Only used for the old /start_handover FSM
-        self.P2 = None
-        self.P2_UP = None
+        self.busy = False  # Flag to prevent starting a new task while one is already running
+        self.P2 = None  # The target handover point received from the ZED camera, in the robot's base coordinate system. It will be a dictionary with keys: x, y, z, roll, pitch, yaw.
+        self.P2_UP = None   # A point slightly above P2, used for the approach motion. 
 
         # --- ZED right hand subscription ---
         self.right_hand_sub = None
         self.latest_hand_point = None
         self.right_hand_lock = threading.Lock()
 
-        self.declare_parameter("right_hand_topic", "/right_hand/point")
-        topic = self.get_parameter("right_hand_topic").get_parameter_value().string_value
+        self.declare_parameter("right_hand_topic", "/right_hand/point") # Declare the parameter 'right_hand_topic' 
+        topic = self.get_parameter("right_hand_topic").get_parameter_value().string_value   # Retrieve the parameter value for the right hand topic
 
         self.right_hand_sub = self.create_subscription(
-            PointStamped, topic, self.right_hand_callback, 10
+            PointStamped, # The type of the message expected from the right hand topic is PointStamped, which contains a point in 3D space along with a timestamp and frame information.
+            topic,  
+            self.right_hand_callback,   # The callback function self.right_hand_callback will be called whenever a new message is received on the right hand topic. This function will process the incoming hand position data and update the target handover point (P2) accordingly. 
+            10  # The queue size for the subscription
         )
         self.get_logger().info(f"Subscribing right hand from topic: {topic}")
 
@@ -107,7 +122,7 @@ class HandoverNode(Node):
 
     # ========== Old all-in-one FSM, for compatibility ==========
     def start_handover_cb(self, request, response):
-        if self.busy:
+        if self.busy:   # Prevent starting a new handover if one is already running
             response.success = False
             response.message = "Handover already running."
             self.get_logger().warn("Received /start_handover but already running.")
@@ -116,6 +131,8 @@ class HandoverNode(Node):
         self.get_logger().info(
             "Received /start_handover request, starting handover thread..."
         )
+
+        # Lock the state and clear target coordinates from any previous runs
         self.busy = True
         self.P2 = None
         self.P2_UP = None
@@ -292,6 +309,7 @@ class HandoverNode(Node):
 
 
 
+
     def execute_handover(self):
         arm = self.arm
 
@@ -307,14 +325,14 @@ class HandoverNode(Node):
 
         # 2) Move to P2_UP (slightly above the hand)
         self.get_logger().info("[execute_handover] Move to P2_UP")
-        ret = move(arm, self.P2_UP, speed=160, acc=5000)
+        ret = move(arm, self.P2_UP, speed=120, acc=5000)
         self.get_logger().info(f"[execute_handover] move to P2_UP ret={ret}")
         if ret != 0:
             self.get_logger().warn(
                 f"[execute_handover] move to P2_UP failed (code={ret}), trying recover()..."
             )
             recover(arm)
-            ret2 = move(arm, self.P2_UP, speed=160, acc=5000)
+            ret2 = move(arm, self.P2_UP, speed=120, acc=5000)
             self.get_logger().info(
                 f"[execute_handover] move to P2_UP after recover ret={ret2}"
             )
