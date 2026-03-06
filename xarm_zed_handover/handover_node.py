@@ -137,7 +137,9 @@ class HandoverNode(Node):
         self.P2 = None
         self.P2_UP = None
 
+        # Run the handover FSM in a separate thread to avoid blocking the ROS2 service callback, allowing the node to remain responsive to other requests and callbacks (like right hand updates) while the handover is in progress.
         t = threading.Thread(target=self.run_handover_fsm, daemon=True)
+        # Start the handover FSM thread, which will go through the states of preparing the tool, waiting for the hand point, executing the handover, and then returning to idle. The thread is marked as daemon so it will automatically exit when the main program exits.
         t.start()
 
         response.success = True
@@ -148,7 +150,7 @@ class HandoverNode(Node):
         try:
             self.state = "PREPARE_TOOL"
             self.get_logger().info("Handover FSM: PREPARE_TOOL")
-            with self.arm_lock:
+            with self.arm_lock: # Ensure exclusive access to the arm during the prepare_tool phase, since it involves multiple sequential motions that should not be interrupted by other service calls or callbacks. This lock will be released after prepare_tool is done, allowing other operations to proceed while waiting for the hand point.
                 self.prepare_tool()
 
             self.state = "WAIT_HAND"
@@ -156,9 +158,15 @@ class HandoverNode(Node):
             self.P2 = None
             self.P2_UP = None
 
+            # Record the current time to track how long we've been waiting
             wait_start = time.time()
+            # Keep looping as long as TWO conditions are met:
+            # 1. `self.P2 is None`: We haven't received the hand coordinate from the camera callback yet.
+            # 2. `rclpy.ok()`: The ROS 2 node is still alive and healthy.
             while self.P2 is None and rclpy.ok():
+                # Sleep for 50ms to prevent this while-loop from consuming 100% of the CPU core
                 time.sleep(0.05)
+                # Check if 60 seconds have passed since we started waiting
                 if time.time() - wait_start > 60.0:
                     self.get_logger().warn(
                         "Timeout waiting for right hand point, aborting handover."
