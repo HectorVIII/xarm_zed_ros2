@@ -9,13 +9,13 @@ MOVE_ACC = 6000
 CLOSE_APPROACH_SPEED = 120  # slower speed for close approach
 CLOSE_APPROACH_ACC = 4000
 GRIPPER_SPEED = 1500
-OPEN_POS = 850    # 85mm
+OPEN_POS = 450    # 85mm
 CLOSE_POS = 50
 MAX_JOINT_SPEED = 60.0  # deg/s, for safety during handover
 
 # Poses (mm/deg)
-P0 = dict(x=366.7, y=66.1, z=70.1, roll=178.6, pitch=-1.6, yaw=2)   # above tool, ready to grip, avoid shelf collision
-P1 = dict(x=366.7, y=66.1, z=24.2,  roll=178.6, pitch=-1.6, yaw=2)   # grip tool
+P0 = dict(x=494, y=-29.4, z=80,  roll=179.2, pitch=-1.8, yaw=-0.1)   # above tool, ready to grip, avoid shelf collision
+P1 = dict(x=494, y=-29.4, z=15,  roll=179.2, pitch=-1.8, yaw=-0.1)   # grip tool
 P2_ORI = dict(roll=177.0, pitch=-8.7, yaw=96.4)  # P2 is detected position by camera, orientation fixed
 
 SAFE_Z_MIN, SAFE_Z_MAX = 0.0, 600.0
@@ -24,12 +24,12 @@ APPROACH_Z_UP = 50.0    # approach height before/after P2
 # ================= Calibration Extrinsics (m) =================
 
 R_cb = np.array([
-    [-0.42034,  0.38526, -0.82152],
-    [ 0.90717,  0.19736, -0.37160],
-    [ 0.01897, -0.90146, -0.43245]
-])
+    [-0.152816883,  0.733177385, -0.662644642],
+    [ 0.988175165,  0.104867217, -0.111860223],
+    [-0.012523686, -0.671903110, -0.740533165]
+], dtype=np.float64)
 
-t_cb = np.array([0.85792, 0.73007, 0.59155])
+t_cb = np.array([0.694418397, 0.431523428, 0.596290570], dtype=np.float64)
 #RMSE = 404 mm
 
 #R_cb = np.array([
